@@ -108,63 +108,83 @@ function fm(v){if(v==null||isNaN(v))return"-";if(Math.abs(v)>=100)return Math.ro
 function pp(n,s,nh){var h=nh||140;return s==="out"?{x:n.x+NW+PR,y:n.y+h/2}:{x:n.x-PR,y:n.y+h/2};}
 
 function makeAllRoutes(conns,nodes,nhM){
-  // First pass: compute raw routes
-  var routes=[];
-  var channelUsers={};// key "v:X" or "h:Y" -> count
-  
+  var PORT_SPREAD=16;// vertical spread per connection at same port
+  var CHAN_SPREAD=20;// horizontal spread for parallel vertical segments
+  var BACK_SPREAD=18;// vertical spread for backward horizontal channels
+
+  // Count connections per port: outPorts[nodeId]=[connIdx,...], inPorts[nodeId]=[connIdx,...]
+  var outPorts={},inPorts={};
+  for(var i=0;i<nodes.length;i++){outPorts[nodes[i].id]=[];inPorts[nodes[i].id]=[];}
+  for(var i=0;i<conns.length;i++){
+    if(outPorts[conns[i].from])outPorts[conns[i].from].push(i);
+    if(inPorts[conns[i].to])inPorts[conns[i].to].push(i);
+  }
+
+  // For each connection, compute offset at source port and target port
+  var result=[];
+  // Group backward connections by row-band for channel Y offset
+  var backChannels={};
+
+  // First pass: classify and group backward connections
   for(var ci=0;ci<conns.length;ci++){
     var cn=conns[ci],fn=null,tn=null;
     for(var j=0;j<nodes.length;j++){if(nodes[j].id===cn.from)fn=nodes[j];if(nodes[j].id===cn.to)tn=nodes[j];}
-    if(!fn||!tn){routes.push(null);continue;}
+    if(!fn||!tn)continue;
     var p1=pp(fn,"out",nhM[fn.id]),p2=pp(tn,"in",nhM[tn.id]);
-    var dx=p2.x-p1.x,dy=p2.y-p1.y;
-
-    if(dx>0&&Math.abs(dy)<10){
-      // Straight horizontal
-      routes.push({pts:[p1,p2],type:"straight"});
-    } else if(dx>0){
-      // Forward Z-route: find midpoint X channel
-      var mx=Math.round(p1.x+dx/2);
-      // Quantize to detect shared channels
-      var chKey="v:"+Math.round(mx/20)*20;
-      if(!channelUsers[chKey])channelUsers[chKey]=[];
-      channelUsers[chKey].push(ci);
-      routes.push({pts:null,type:"forward",p1:p1,p2:p2,mx:mx,chKey:chKey});
-    } else {
-      // Backward route
-      var fH=nhM[fn.id]||140,tH=nhM[tn.id]||140;
-      var cY=Math.max(fn.y+fH,tn.y+tH)+40;
-      var chKey2="h:"+Math.round(cY/20)*20;
-      if(!channelUsers[chKey2])channelUsers[chKey2]=[];
-      channelUsers[chKey2].push(ci);
-      routes.push({pts:null,type:"backward",p1:p1,p2:p2,cY:cY,chKey:chKey2,exitX:p1.x+35,enterX:p2.x-35});
+    if(p2.x-p1.x<=0){
+      // backward: group by Y band
+      var band=Math.round(Math.max(fn.y,tn.y)/100);
+      var bk="b"+band;
+      if(!backChannels[bk])backChannels[bk]=[];
+      backChannels[bk].push(ci);
     }
   }
 
-  // Second pass: offset shared channels
-  var SPREAD=18;
-  var result=[];
-  for(var ci=0;ci<routes.length;ci++){
-    var r=routes[ci];
-    if(!r){result.push([]);continue;}
-    if(r.type==="straight"){
-      result.push(r.pts);
-    } else if(r.type==="forward"){
-      var users=channelUsers[r.chKey]||[ci];
-      var idx=users.indexOf(ci);
-      var total=users.length;
-      var offset=(idx-(total-1)/2)*SPREAD;
-      var mx2=r.mx+offset;
-      result.push([r.p1,{x:mx2,y:r.p1.y},{x:mx2,y:r.p2.y},r.p2]);
+  for(var ci=0;ci<conns.length;ci++){
+    var cn=conns[ci],fn=null,tn=null;
+    for(var j=0;j<nodes.length;j++){if(nodes[j].id===cn.from)fn=nodes[j];if(nodes[j].id===cn.to)tn=nodes[j];}
+    if(!fn||!tn){result.push([]);continue;}
+
+    var p1=pp(fn,"out",nhM[fn.id]),p2=pp(tn,"in",nhM[tn.id]);
+
+    // Offset at source port (fan-out)
+    var outList=outPorts[fn.id];
+    var outIdx=outList.indexOf(ci);
+    var outTotal=outList.length;
+    var outOff=(outIdx-(outTotal-1)/2)*PORT_SPREAD;
+
+    // Offset at target port (fan-in)
+    var inList=inPorts[tn.id];
+    var inIdx=inList.indexOf(ci);
+    var inTotal=inList.length;
+    var inOff=(inIdx-(inTotal-1)/2)*PORT_SPREAD;
+
+    var sp={x:p1.x,y:p1.y+outOff};// start point with offset
+    var ep={x:p2.x,y:p2.y+inOff};// end point with offset
+
+    var dx=ep.x-sp.x,dy=ep.y-sp.y;
+
+    if(dx>0&&Math.abs(dy)<10){
+      // Straight horizontal
+      result.push([sp,ep]);
+    } else if(dx>0){
+      // Forward Z-route
+      var mx=sp.x+dx/2;
+      result.push([sp,{x:mx,y:sp.y},{x:mx,y:ep.y},ep]);
     } else {
-      // backward
-      var users2=channelUsers[r.chKey]||[ci];
-      var idx2=users2.indexOf(ci);
-      var total2=users2.length;
-      var offsetY=(idx2-(total2-1)/2)*SPREAD;
-      var offsetX=idx2*SPREAD;
-      var cY2=r.cY+offsetY;
-      result.push([r.p1,{x:r.exitX+offsetX,y:r.p1.y},{x:r.exitX+offsetX,y:cY2},{x:r.enterX-offsetX,y:cY2},{x:r.enterX-offsetX,y:r.p2.y},r.p2]);
+      // Backward: route around below
+      var fH=nhM[fn.id]||140,tH=nhM[tn.id]||140;
+      var baseY=Math.max(fn.y+fH,tn.y+tH)+35;
+      // Find which backward channel group this belongs to
+      var band2=Math.round(Math.max(fn.y,tn.y)/100);
+      var bk2="b"+band2;
+      var bGroup=backChannels[bk2]||[ci];
+      var bIdx=bGroup.indexOf(ci);
+      var channelOff=bIdx*BACK_SPREAD;
+      var cY=baseY+channelOff;
+      var exitX=sp.x+25+bIdx*12;
+      var enterX=ep.x-25-bIdx*12;
+      result.push([sp,{x:exitX,y:sp.y},{x:exitX,y:cY},{x:enterX,y:cY},{x:enterX,y:ep.y},ep]);
     }
   }
   return result;
