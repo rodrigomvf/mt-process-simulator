@@ -106,15 +106,68 @@ function cidx(cid){return CAT_IDS.indexOf(cid);}
 function fm(v){if(v==null||isNaN(v))return"-";if(Math.abs(v)>=100)return Math.round(v).toString();return Number(v.toFixed(1)).toString();}
 
 function pp(n,s,nh){var h=nh||140;return s==="out"?{x:n.x+NW+PR,y:n.y+h/2}:{x:n.x-PR,y:n.y+h/2};}
-function makeRoute(fN,tN,allN,nhM){
-  var p1=pp(fN,"out",nhM[fN.id]),p2=pp(tN,"in",nhM[tN.id]);
-  var dx=p2.x-p1.x,dy=p2.y-p1.y;
-  if(dx>0&&Math.abs(dy)<10)return[p1,p2];
-  if(dx>0&&Math.abs(dy)<100){var mx=p1.x+dx/2;return[p1,{x:mx,y:p1.y},{x:mx,y:p2.y},p2];}
-  if(dx>0){var mx2=p1.x+dx*0.5;return[p1,{x:mx2,y:p1.y},{x:mx2,y:p2.y},p2];}
-  var fH=nhM[fN.id]||140,tH=nhM[tN.id]||140;
-  var cY=Math.max(fN.y+fH,tN.y+tH)+40;
-  return[p1,{x:p1.x+35,y:p1.y},{x:p1.x+35,y:cY},{x:p2.x-35,y:cY},{x:p2.x-35,y:p2.y},p2];
+
+function makeAllRoutes(conns,nodes,nhM){
+  // First pass: compute raw routes
+  var routes=[];
+  var channelUsers={};// key "v:X" or "h:Y" -> count
+  
+  for(var ci=0;ci<conns.length;ci++){
+    var cn=conns[ci],fn=null,tn=null;
+    for(var j=0;j<nodes.length;j++){if(nodes[j].id===cn.from)fn=nodes[j];if(nodes[j].id===cn.to)tn=nodes[j];}
+    if(!fn||!tn){routes.push(null);continue;}
+    var p1=pp(fn,"out",nhM[fn.id]),p2=pp(tn,"in",nhM[tn.id]);
+    var dx=p2.x-p1.x,dy=p2.y-p1.y;
+
+    if(dx>0&&Math.abs(dy)<10){
+      // Straight horizontal
+      routes.push({pts:[p1,p2],type:"straight"});
+    } else if(dx>0){
+      // Forward Z-route: find midpoint X channel
+      var mx=Math.round(p1.x+dx/2);
+      // Quantize to detect shared channels
+      var chKey="v:"+Math.round(mx/20)*20;
+      if(!channelUsers[chKey])channelUsers[chKey]=[];
+      channelUsers[chKey].push(ci);
+      routes.push({pts:null,type:"forward",p1:p1,p2:p2,mx:mx,chKey:chKey});
+    } else {
+      // Backward route
+      var fH=nhM[fn.id]||140,tH=nhM[tn.id]||140;
+      var cY=Math.max(fn.y+fH,tn.y+tH)+40;
+      var chKey2="h:"+Math.round(cY/20)*20;
+      if(!channelUsers[chKey2])channelUsers[chKey2]=[];
+      channelUsers[chKey2].push(ci);
+      routes.push({pts:null,type:"backward",p1:p1,p2:p2,cY:cY,chKey:chKey2,exitX:p1.x+35,enterX:p2.x-35});
+    }
+  }
+
+  // Second pass: offset shared channels
+  var SPREAD=18;
+  var result=[];
+  for(var ci=0;ci<routes.length;ci++){
+    var r=routes[ci];
+    if(!r){result.push([]);continue;}
+    if(r.type==="straight"){
+      result.push(r.pts);
+    } else if(r.type==="forward"){
+      var users=channelUsers[r.chKey]||[ci];
+      var idx=users.indexOf(ci);
+      var total=users.length;
+      var offset=(idx-(total-1)/2)*SPREAD;
+      var mx2=r.mx+offset;
+      result.push([r.p1,{x:mx2,y:r.p1.y},{x:mx2,y:r.p2.y},r.p2]);
+    } else {
+      // backward
+      var users2=channelUsers[r.chKey]||[ci];
+      var idx2=users2.indexOf(ci);
+      var total2=users2.length;
+      var offsetY=(idx2-(total2-1)/2)*SPREAD;
+      var offsetX=idx2*SPREAD;
+      var cY2=r.cY+offsetY;
+      result.push([r.p1,{x:r.exitX+offsetX,y:r.p1.y},{x:r.exitX+offsetX,y:cY2},{x:r.enterX-offsetX,y:cY2},{x:r.enterX-offsetX,y:r.p2.y},r.p2]);
+    }
+  }
+  return result;
 }
 function makePath(pts){
   if(pts.length<2)return"";if(pts.length===2)return"M"+pts[0].x+" "+pts[0].y+"L"+pts[1].x+" "+pts[1].y;
@@ -277,9 +330,10 @@ function Simulator(props){
     function mv(e){if(!dragging)return;var cr=canvasRef.current?canvasRef.current.getBoundingClientRect():{left:0,top:0};var se=canvasRef.current?canvasRef.current.parentElement:null;
       var nx=e.clientX+(se?se.scrollLeft:0)-cr.left-dragOff.current.x,ny=e.clientY+(se?se.scrollTop:0)-cr.top-dragOff.current.y;
       setNodes(function(p){return p.map(function(n){return n.id===dragging?Object.assign({},n,{x:nx,y:ny}):n;});});}
-    function up(){setDragging(null);setCFrom(null);}
-    window.addEventListener("mousemove",mv);window.addEventListener("mouseup",up);
-    return function(){window.removeEventListener("mousemove",mv);window.removeEventListener("mouseup",up);};
+    function up(){setDragging(null);}
+    function kd(e){if(e.key==="Escape")setCFrom(null);}
+    window.addEventListener("mousemove",mv);window.addEventListener("mouseup",up);window.addEventListener("keydown",kd);
+    return function(){window.removeEventListener("mousemove",mv);window.removeEventListener("mouseup",up);window.removeEventListener("keydown",kd);};
   },[dragging]);
   function onCE(nid){if(cFrom&&cFrom!==nid){var exists=false;for(var i=0;i<conns.length;i++){if(conns[i].from===cFrom&&conns[i].to===nid){exists=true;break;}}if(!exists)setConns(function(p){return p.concat([{from:cFrom,to:nid}]);});}setCFrom(null);}
   function resetTpl(){var tt=mkTpl();setNodes(tt.nodes);setConns(tt.conns);setSelId(null);}
@@ -287,12 +341,13 @@ function Simulator(props){
   function getLabel(n){return n.lk?t[n.lk]||n.lk:t[n.categoryId]||n.categoryId;}
 
   /* ═══ RENDER ═══ */
+  var allRoutes=makeAllRoutes(conns,nodes,nodeH);
   var connEls=[];
   for(var ci2=0;ci2<conns.length;ci2++){
     var cn=conns[ci2],fn=null,tn=null;
     for(var j=0;j<nodes.length;j++){if(nodes[j].id===cn.from)fn=nodes[j];if(nodes[j].id===cn.to)tn=nodes[j];}
-    if(!fn||!tn)continue;
-    var pts=makeRoute(fn,tn,nodes,nodeH),path=makePath(pts),col=CAT_COL[cidx(fn.categoryId)],isH=hovC===ci2;
+    if(!fn||!tn||!allRoutes[ci2]||allRoutes[ci2].length<2)continue;
+    var pts=allRoutes[ci2],path=makePath(pts),col=CAT_COL[cidx(fn.categoryId)],isH=hovC===ci2;
     var p2=pts[pts.length-1],prev=pts[pts.length-2],mid=pts[Math.floor(pts.length/2)];
     var ax=Math.atan2(p2.y-prev.y,p2.x-prev.x);
     connEls.push(
@@ -327,10 +382,10 @@ function Simulator(props){
           border:"2px solid "+(isSel?col:overCap?"rgba(239,68,68,0.5)":"rgba(255,255,255,0.07)"),
           borderRadius:12,cursor:"grab",zIndex:isSel?10:2,
           boxShadow:isSel?"0 0 20px "+col+"30":"0 3px 14px rgba(0,0,0,0.3)",userSelect:"none"}}>
-        <div onMouseDown={function(e){e.stopPropagation();}} onMouseUp={function(){if(cFrom)onCE(node.id);}}
-          style={{position:"absolute",left:-PR,top:"50%",transform:"translateY(-50%)",width:PR*2,height:PR*2,borderRadius:"50%",background:cFrom?col:"rgba(255,255,255,0.1)",border:"2px solid "+col,cursor:"pointer",zIndex:20}}/>
-        <div onMouseDown={function(e){e.stopPropagation();setCFrom(node.id);}}
-          style={{position:"absolute",right:-PR,top:"50%",transform:"translateY(-50%)",width:PR*2,height:PR*2,borderRadius:"50%",background:"rgba(255,255,255,0.1)",border:"2px solid "+col,cursor:"crosshair",zIndex:20}}/>
+        <div onMouseDown={function(e){e.stopPropagation();}} onClick={function(e){e.stopPropagation();if(cFrom)onCE(node.id);}}
+          style={{position:"absolute",left:-PR,top:"50%",transform:"translateY(-50%)",width:PR*2,height:PR*2,borderRadius:"50%",background:cFrom?col:"rgba(255,255,255,0.1)",border:"2px solid "+col,cursor:cFrom?"pointer":"default",zIndex:20,boxShadow:cFrom?"0 0 10px "+col+"55":"none",transition:"all 0.2s"}}/>
+        <div onClick={function(e){e.stopPropagation();setCFrom(node.id);}} onMouseDown={function(e){e.stopPropagation();}}
+          style={{position:"absolute",right:-PR,top:"50%",transform:"translateY(-50%)",width:PR*2,height:PR*2,borderRadius:"50%",background:cFrom===node.id?"#059669":"rgba(255,255,255,0.1)",border:"2px solid "+col,cursor:"crosshair",zIndex:20,boxShadow:cFrom===node.id?"0 0 10px #05966966":"none",transition:"all 0.2s"}}/>
         {isSel&&<button onMouseDown={function(e){e.stopPropagation();}} onClick={function(e){e.stopPropagation();rmNode(node.id);}}
           style={{position:"absolute",top:-9,right:-9,width:20,height:20,borderRadius:"50%",background:"#1E2026",border:"2px solid rgba(239,68,68,0.5)",color:"#EF4444",fontSize:10,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",zIndex:20,padding:0}}>x</button>}
         <div style={{padding:"9px 12px 5px",borderBottom:"1px solid rgba(255,255,255,0.04)",display:"flex",alignItems:"center",gap:8}}>
@@ -469,12 +524,12 @@ function Simulator(props){
           </div>
         </div>
         <div style={{flex:1,overflow:"auto",background:"linear-gradient(rgba(255,255,255,0.015) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,0.015) 1px,transparent 1px)",backgroundSize:"40px 40px"}}>
-          <div ref={canvasRef} data-canvas="true" onClick={function(e){if(e.target===canvasRef.current||e.target.getAttribute("data-canvas"))setSelId(null);}}
+          <div ref={canvasRef} data-canvas="true" onClick={function(e){if(e.target===canvasRef.current||e.target.getAttribute("data-canvas")){setSelId(null);setCFrom(null);}}}
             style={{width:1650,minHeight:1200,position:"relative",padding:20}}>
             {nodes.length===0&&<div style={{position:"absolute",top:"38%",left:"50%",transform:"translate(-50%,-50%)",textAlign:"center",color:"rgba(255,255,255,0.16)",pointerEvents:"none"}}><div style={{fontSize:14,fontWeight:600}}>{t.buildLine}</div><div style={{fontSize:11,marginTop:6}}>{t.buildSub}</div></div>}
             <svg style={{position:"absolute",top:0,left:0,width:"100%",height:"100%",pointerEvents:"none",zIndex:15}}>{connEls}</svg>
             {nodeEls}
-            {cFrom&&<div style={{position:"fixed",top:8,left:"50%",transform:"translateX(-50%)",background:"rgba(5,150,105,0.9)",color:"#fff",padding:"6px 16px",borderRadius:16,fontSize:10.5,fontWeight:600,zIndex:100}}>{t.connectMsg}</div>}
+            {cFrom&&<div onClick={function(){setCFrom(null);}} style={{position:"fixed",top:8,left:"50%",transform:"translateX(-50%)",background:"rgba(5,150,105,0.9)",color:"#fff",padding:"6px 16px",borderRadius:16,fontSize:10.5,fontWeight:600,zIndex:100,cursor:"pointer"}}>{t.connectMsg} <span style={{opacity:0.6,marginLeft:6}}>ESC cancelar</span></div>}
           </div>
         </div>
       </div>
